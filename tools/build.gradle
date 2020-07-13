@@ -22,6 +22,21 @@ task wallet_tool(type: JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
 }
 
+task uberJar(type: Jar) {
+    archiveClassifier = 'uber'
+    manifest {
+        attributes 'Implementation-Title': 'Wallet Tool fat JAR',
+        'Main-Class': 'org.bitcoinj.tools.WalletTool'
+        //'Class-Path' : sourceSets.main.runtimeClasspath.findAll { it.name.endsWith('.jar')}.join(' ')
+    }
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from {
+         configurations.runtimeClasspath.findAll {it.name.endsWith('.jar')}.collect {zipTree(it)}
+    }
+    { exclude 'META-INF/*.RSA', 'META-INF/*.SF', 'META-INF/*.DSA' }
+}
+
 task build_checkpoints(type: JavaExec) {
     description = 'Create checkpoint files to use with CheckpointManager.'
     main = 'org.bitcoinj.tools.BuildCheckpoints'

@@ -102,12 +102,14 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Level;
 import java.util.logging.LogManager;
 
@@ -128,6 +130,12 @@ public class WalletTool {
     private static OptionSpec<Script.ScriptType> outputScriptTypeFlag;
     private static OptionSpec<String> xpubkeysFlag;
 
+    private static OptionSpec<Integer> reportIntervalFlag;
+    private static OptionSpec<Integer> threadsFlag;
+    private static OptionSpec<Integer> digitsFlag;
+    private static OptionSpec<String> recoveryIniFlag;
+    private static OptionSpec<String> recoveryFiniFlag;
+
     private static NetworkParameters params;
     private static File walletFile;
     private static BlockStore store;
@@ -138,6 +146,147 @@ public class WalletTool {
     private static ValidationMode mode;
     private static String password;
     private static org.bitcoin.protocols.payments.Protos.PaymentRequest paymentRequest;
+
+    private static int numThreads;
+    private static int minDigits;
+    private static long reportInterval;
+
+    private static class DecryptionThread extends Thread {
+        private Integer nThread;
+        private String passThread;
+        private static ArrayList<AtomicReference<String>> passArray;
+        private String rangeStart;
+        private String rangeEnd;
+        private Integer digits;
+        private File walletFile;
+        private Wallet wallet;
+        private static AtomicReference<Boolean> passwordFound;
+        private static Integer threadFound;
+        private static String passFound;
+        private static long elapsedTime;
+        private String lastPass;
+        DecryptionThread(Integer nThread, String password, Integer digits,
+                         String rangeStart, String rangeEnd, Wallet wallet) {
+            this.nThread = nThread;
+            this.wallet = wallet;
+            passThread = null;
+            this.rangeStart = rangeStart;
+            if (this.rangeStart != null) {
+                passThread = new String(rangeStart);
+            } else {
+                passThread = new String(password);
+            }
+            this.rangeEnd = rangeEnd;
+            if (digits == null) this.digits = 0;
+            else this.digits = digits;
+
+            lastPass = "0";
+        }
+
+        public static void initialize() {
+            passArray = new ArrayList(numThreads);
+            AtomicReference<String> tmp = new AtomicReference<String>();
+            tmp.set("0");
+            for (int i = 0; i < numThreads; i++) {
+                passArray.add(tmp);
+                tmp = new AtomicReference<String>();
+                tmp.set("0");
+            }
+            passwordFound = new AtomicReference<Boolean>();
+            passwordFound.set(false);
+            elapsedTime = 0;
+            passFound = null;
+            threadFound = null;
+        }
+
+        public Boolean getFound() {
+            return passwordFound.get();
+        }
+        
+        public void setFound() {
+            passwordFound.set(true);
+            return;
+        }
+
+        public static Integer getThreadFoundId() {
+            return threadFound;
+        }
+
+        public static String getFoundPassword() {
+            return passArray.get(threadFound).get();
+        }
+
+        public void run() {
+            if (passThread == null) {
+                System.err.println("Thread " + nThread.toString() +
+                                   "You must provide a --password");
+                return;
+            }
+            if (!wallet.isEncrypted()) {
+                System.err.println("Thread " + nThread.toString() +
+                                   "This wallet is not encrypted.");
+                return;
+            }
+
+            long beginTime = System.currentTimeMillis();
+            long endTime = beginTime;
+            long elapsed = 0;
+            while(!passwordFound.get()) {
+                try {
+                    /*System.out.println("Thread " + nThread.toString() +
+                      " trying PIN: " + passThread);*/
+                    if (wallet.checkPassword(passThread)) {
+                        passwordFound.set(true);
+                        threadFound = nThread;
+                        passFound = passThread;
+                        passArray.get(nThread).set(passThread);
+                        return;
+                    }
+                    Integer passInt = Integer.parseInt(passThread) + numThreads;
+                    if (this.rangeEnd != null) {
+                        if (passInt > Integer.parseInt(this.rangeEnd)) {
+                            System.err.println("Thread " + nThread.toString() +
+                                               " did not find a valid PIN. " +
+                                               "End of search range reached.");
+                            return;
+                        }
+                    }
+                    passThread = String.format("%0"+this.digits.toString()+"d",passInt);
+                } catch (KeyCrypterException e) {
+                    System.err.println("Thread " + nThread.toString() +
+                                       " PIN " + passThread.toString() +
+                                       " incorrect.");
+                }
+
+                if (nThread == 0 && reportInterval != 0) {
+                    endTime = System.currentTimeMillis();
+                    elapsed = endTime - beginTime;
+                    if (elapsed > reportInterval) {
+                        Integer max = Integer.parseInt(passArray.get(0).get());
+                        Integer current = max;
+                        for (int i = 0; i < numThreads; i++) {
+                            AtomicReference<String> p = passArray.get(0);
+                            System.out.println("Thread " + Integer.toString(i) +
+                                               " last tested PIN is: " +
+                                               current.toString());
+                            current = Integer.parseInt(p.get());
+                            if (current > max) max = current;
+                        }
+                        elapsedTime += elapsed;
+                        beginTime = endTime;
+                        System.out.println("Test rate: " +
+                                           Float.toString(
+                                               (current - Float.parseFloat(lastPass))
+                                               / (elapsed / 1000))
+                                           + " PIN/s");
+                        lastPass = Integer.toString(current);
+                        System.out.println("Latest tested PIN: " + lastPass);
+                    }
+                }
+                passArray.get(nThread).set(passThread);
+            }
+        }
+    }
 
     public static class Condition {
         public enum Type {
@@ -216,6 +365,8 @@ public class WalletTool {
         UPGRADE,
         ROTATE,
         SET_CREATION_TIME,
+        RECOVERY,
+        CHECK_PASSWORD,
     }
 
     public enum WaitForEnum {
@@ -235,6 +386,13 @@ public class WalletTool {
         parser.accepts("help");
         parser.accepts("force");
         parser.accepts("debuglog");
+        threadsFlag = parser.accepts("threads").withRequiredArg().ofType(Integer.class);
+        digitsFlag = parser.accepts("min-digits").withRequiredArg().ofType(Integer.class);
+        reportIntervalFlag = parser.accepts("report-interval").withRequiredArg().ofType(Integer.class);
+        
+        recoveryIniFlag = parser.accepts("recover-ini").withRequiredArg();
+        recoveryFiniFlag = parser.accepts("recover-fini").withRequiredArg();
+
         OptionSpec<String> walletFileName = parser.accepts("wallet").withRequiredArg().defaultsTo("wallet");
         seedFlag = parser.accepts("seed").withRequiredArg();
         watchFlag = parser.accepts("watchkey").withRequiredArg();
@@ -331,6 +489,7 @@ public class WalletTool {
         }
 
         walletFile = new File(walletFileName.value(options));
+        
         if (action == ActionEnum.CREATE) {
             createWallet(options, params, walletFile);
             return;  // We're done.
@@ -354,33 +513,16 @@ public class WalletTool {
             }
         }
 
-        InputStream walletInputStream = null;
-        try {
-            boolean forceReset = action == ActionEnum.RESET
-                || (action == ActionEnum.SYNC
-                    && options.has("force"));
-            WalletProtobufSerializer loader = new WalletProtobufSerializer();
-            if (options.has("ignore-mandatory-extensions"))
-                loader.setRequireMandatoryExtensions(false);
-            walletInputStream = new BufferedInputStream(new FileInputStream(walletFile));
-            wallet = loader.readWallet(walletInputStream, forceReset, (WalletExtension[])(null));
-            if (!wallet.getParams().equals(params)) {
-                System.err.println("Wallet does not match requested network parameters: " +
-                        wallet.getParams().getId() + " vs " + params.getId());
-                return;
-            }
-        } catch (Exception e) {
-            System.err.println("Failed to load wallet '" + walletFile + "': " + e.getMessage());
-            e.printStackTrace();
-            return;
-        } finally {
-            if (walletInputStream != null) {
-                walletInputStream.close();
-            }
-        }
-
+        wallet = loadWallet(action);
+        
         // What should we do?
         switch (action) {
+            case CHECK_PASSWORD:
+                if (!checkPassword()) {
+                    System.err.println("The password is incorrect.");
+                } else System.err.println("Password is correct.");
+                break;
+            case RECOVERY: recovery(); break;
             case DUMP: dumpWallet(); break;
             case ADD_KEY: addKey(); break;
             case ADD_ADDR: addAddr(); break;
@@ -1444,6 +1586,13 @@ public class WalletTool {
         System.out.println();
     }
 
+    private static boolean checkPassword() {
+        if (password == null) {
+            System.err.println("You must provide a password.");
+            return false;
+        } else return wallet.checkPassword(password);
+    }
+
     @Nullable
     private static KeyParameter passwordToKey(boolean printError) {
         if (password == null) {
@@ -1541,6 +1690,123 @@ public class WalletTool {
         } else {
             System.out.println(wallet.toString(dumpLookahead, dumpPrivkeys, null, true, true, chain));
         }
+    }
+
+    private static void recovery() {
+        if (password == null) {
+            System.err.println("Find password without base password not provided.");
+            return;
+        }
+
+        if (options.has("report-interval")) {
+            reportInterval = reportIntervalFlag.value(options) * 1000;
+            if (reportInterval <= 0) {
+                System.err.println("Error: report-interval has to be > 0 seconds.");
+                return;
+            }
+        }
+        
+        minDigits = 1;
+        if (options.has("min-digits")) {
+            minDigits = digitsFlag.value(options);
+            if (minDigits <= 0) {
+                System.err.println("Error: min-digits is empty.");
+                return;
+            }
+        }
+        
+        numThreads = 1;
+        if (options.has("threads")) {
+            numThreads = threadsFlag.value(options);
+            if (numThreads <= 0) {
+                System.err.println("Error: thread number is either empty or less than 1.");
+                return;
+            }
+        }
+
+        String rangeStart, rangeEnd;
+
+        if (options.has("recover-ini")) {
+            rangeStart = recoveryIniFlag.value(options);
+        } else rangeStart = null;
+        
+        if (options.has("recover-fini")) {
+            rangeEnd = recoveryFiniFlag.value(options);
+        } else rangeEnd = null;
+
+        if (password.length() < minDigits) {
+            String.format("%0" + Integer.toString(minDigits) + "d",
+                          Integer.parseInt(password));
+        }
+        DecryptionThread[] arrayDT = new DecryptionThread[numThreads];
+        DecryptionThread.initialize();
+
+        try {
+            for (int i = 0; i < numThreads; i++) {
+                arrayDT[i] = new DecryptionThread(i, Integer.toString(
+                                                      Integer.parseInt(
+                                                          password)+i),
+                                                  minDigits,
+                                                  rangeStart, rangeEnd,
+                                                  loadWallet(null));
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.out.println("Could not load/close the Wallet");
+            System.exit(-1);
+        }
+
+        for (int i = 1; i < numThreads; i++) {
+            arrayDT[i].start();
+        }
+
+        arrayDT[0].start();
+
+        for (int i = 0; i < numThreads; i++) {
+            try {
+                arrayDT[i].join();
+            } catch (Exception e) {
+                e.printStackTrace();
+                System.out.println(
+                    "Exception thrown while joining thread " + i
+                    );
+            }
+        }
+        System.out.println("Thread " + DecryptionThread.getThreadFoundId() +
+                           " found PIN: " + DecryptionThread.getFoundPassword());
+       
+    }
+
+    private static Wallet loadWallet() throws Exception {
+        return loadWallet(null);
+    }
+    private static Wallet loadWallet(ActionEnum action) throws Exception {
+        InputStream walletInputStream = null;
+        Wallet wallet;
+        try {
+            boolean forceReset = action == ActionEnum.RESET
+                || (action == ActionEnum.SYNC
+                    && options.has("force"));
+            WalletProtobufSerializer loader = new WalletProtobufSerializer();
+            if (options.has("ignore-mandatory-extensions"))
+                loader.setRequireMandatoryExtensions(false);
+            walletInputStream = new BufferedInputStream(new FileInputStream(walletFile));
+            wallet = loader.readWallet(walletInputStream, forceReset, (WalletExtension[])(null));
+            if (!wallet.getParams().equals(params)) {
+                System.err.println("Wallet does not match requested network parameters: " +
+                        wallet.getParams().getId() + " vs " + params.getId());
+                return null;
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to load wallet '" + walletFile + "': " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        } finally {
+            if (walletInputStream != null) {
+                walletInputStream.close();
+            }
+        }
+        return wallet;
     }
 
     private static void setCreationTime() {

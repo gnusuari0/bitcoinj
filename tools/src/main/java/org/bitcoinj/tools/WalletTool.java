@@ -208,6 +208,10 @@ public class WalletTool {
             return;
         }
 
+        public static long getElapsedTime() {
+            return elapsedTime;
+        }
+
         public static Integer getThreadFoundId() {
             return threadFound;
         }
@@ -265,21 +269,21 @@ public class WalletTool {
                         Integer max = Integer.parseInt(passArray.get(0).get());
                         Integer current = max;
                         for (int i = 0; i < numThreads; i++) {
-                            AtomicReference<String> p = passArray.get(0);
+                            AtomicReference<String> p = passArray.get(i);
+                            current = Integer.parseInt(p.get());
+                            if (current > max) max = current;
                             System.out.println("Thread " + Integer.toString(i) +
                                                " last tested PIN is: " +
                                                current.toString());
-                            current = Integer.parseInt(p.get());
-                            if (current > max) max = current;
                         }
                         elapsedTime += elapsed;
                         beginTime = endTime;
                         System.out.println("Test rate: " +
                                            Float.toString(
-                                               (current - Float.parseFloat(lastPass))
+                                               (max - Float.parseFloat(lastPass))
                                                / (elapsed / 1000))
                                            + " PIN/s");
-                        lastPass = Integer.toString(current);
+                        lastPass = Integer.toString(max);
                         System.out.println("Latest tested PIN: " + lastPass);
                     }
                 }

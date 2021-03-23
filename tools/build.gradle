@@ -22,8 +22,8 @@ task wallet_tool(type: JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
 }
 
-task uberJar(type: Jar) {
-    archiveClassifier = 'uber'
+task wToolJar(type: Jar) {
+    archiveClassifier = 'wallet_tool'
     manifest {
         attributes 'Implementation-Title': 'Wallet Tool fat JAR',
         'Main-Class': 'org.bitcoinj.tools.WalletTool'

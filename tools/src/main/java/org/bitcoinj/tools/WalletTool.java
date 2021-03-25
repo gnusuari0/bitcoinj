@@ -185,12 +185,11 @@ public class WalletTool {
 
         public static void initialize() {
             passArray = new ArrayList(numThreads);
-            AtomicReference<String> tmp = new AtomicReference<String>();
-            tmp.set("0");
+            AtomicReference<String> tmp = null;
             for (int i = 0; i < numThreads; i++) {
-                passArray.add(tmp);
                 tmp = new AtomicReference<String>();
                 tmp.set("0");
+                passArray.add(tmp);
             }
             passwordFound = new AtomicReference<Boolean>();
             passwordFound.set(false);
